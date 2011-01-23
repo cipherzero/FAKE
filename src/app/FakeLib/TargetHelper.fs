@@ -1,4 +1,4 @@
-﻿[<AutoOpen>]
+[<AutoOpen>]
 module Fake.TargetHelper
     
 open System
@@ -6,13 +6,15 @@ open System.Collections.Generic
 
 type TargetTemplate<'a> =
     { Name: string;
-      Dependencies: string list;
+      Dependencies: TargetTemplate<'a> list ref;
       Function : 'a -> unit}
    
 type Target = TargetTemplate<unit>
    
 /// TargetDictionary  
-let TargetDict = new Dictionary<_,_>()
+let TargetDict = new Dictionary<string,_>()
+
+let AllTargets : Target list ref = ref [ { Name = String.Empty; Dependencies = ref []; Function = fun _ -> () } ]
 
 /// Final Targets - stores final target and if it is activated
 let FinalTargets = new Dictionary<_,_>()
@@ -25,15 +27,16 @@ let ExecutedTargetTimes = new List<_>()
 
 /// Gets a target with the given name from the target dictionary
 let getTarget name = 
-    match TargetDict.TryGetValue name with
-    | true, target -> target
-    | _  -> failwithf "Target \"%s\" is not defined." name
+//    match TargetDict.TryGetValue name with
+//    | true, target -> target
+//    | _  -> failwithf "Target \"%s\" is not defined." name
+    name
 
 /// Returns the DependencyString for the given target
 let dependencyString target =
-    if target.Dependencies.IsEmpty then String.Empty else
-    target.Dependencies 
-      |> Seq.map (fun d -> (getTarget d).Name)
+    if (!target.Dependencies).IsEmpty then String.Empty else
+    !target.Dependencies 
+      |> Seq.map (fun d -> d.Name)
       |> separated ", "
       |> sprintf "(==> %s)"
 
@@ -45,15 +48,15 @@ let DoNothing = (fun () -> ())
 
 /// Checks wether the dependency can be add
 let checkIfDependencyCanBeAdd targetName dependentTargetName =
-    let target = getTarget targetName
+    let target = targetName
     let dependentTarget = getTarget dependentTargetName
 
     let rec checkDependencies dependentTarget =
-        dependentTarget.Dependencies 
+        !dependentTarget.Dependencies 
           |> List.iter (fun dep ->
-               if dep = targetName then 
-                  failwithf "Cyclic dependency between %s and %s" targetName dependentTarget.Name
-               checkDependencies (getTarget dep))
+               if LanguagePrimitives.PhysicalEquality dep targetName then 
+                  failwithf "Cyclic dependency between %s and %s" targetName.Name dependentTarget.Name
+               checkDependencies (dep))
       
     checkDependencies dependentTarget
     target,dependentTarget
@@ -61,14 +64,15 @@ let checkIfDependencyCanBeAdd targetName dependentTargetName =
 /// Adds the dependency to the front of the list of dependencies
 let dependencyAtFront targetName dependentTargetName =
     let target,dependentTarget = checkIfDependencyCanBeAdd targetName dependentTargetName
+    target.Dependencies := dependentTargetName :: !target.Dependencies
     
-    TargetDict.[targetName] <- { target with Dependencies = dependentTargetName :: target.Dependencies }
+//    TargetDict.[targetName] <- { target with Dependencies = ref (dependentTargetName :: !target.Dependencies) }
   
 /// Appends the dependency to the list of dependencies
 let dependencyAtEnd targetName dependentTargetName =
     let target,dependentTarget = checkIfDependencyCanBeAdd targetName dependentTargetName
-    
-    TargetDict.[targetName] <- { target with Dependencies = target.Dependencies @ [dependentTargetName] }
+    target.Dependencies := !target.Dependencies @ [dependentTargetName] 
+//    TargetDict.[targetName] <- { target with Dependencies = target.Dependencies @ [dependentTargetName] }
 
 /// Adds the dependency to the list of dependencies
 let dependency = dependencyAtEnd
@@ -81,25 +85,25 @@ let inline (<==) x y = Dependencies x y
 
 /// Set a dependency for all given targets
 let TargetsDependOn target targets =
-    getAllTargetsNames()
+    !AllTargets
     |> Seq.toList  // work on copy since the dict will be changed
-    |> List.filter ((<>) target)
-    |> List.filter (fun t -> Seq.contains t targets)
+    |> List.filter (LanguagePrimitives.PhysicalEquality target >> not)
+    |> List.filter (fun t -> Seq.exists (LanguagePrimitives.PhysicalEquality t) targets)
     |> List.iter (fun t -> dependencyAtFront t target)
 
 /// Set a dependency for all registered targets
-let AllTargetsDependOn target = getAllTargetsNames() |> TargetsDependOn target
+let AllTargetsDependOn target = !AllTargets |> TargetsDependOn target
   
 /// Creates a target from template
-let targetFromTemplate template name parameters =    
-    TargetDict.Add(name,
-      { Name = name; 
-        Dependencies = [];
+let targetFromTemplate template name parameters =  
+    let t = { Name = name; 
+        Dependencies = ref [];
         Function = fun () ->
           // Don't run function now
-          template.Function parameters })
+          template.Function parameters }  
+    AllTargets := t :: !AllTargets
 
-    name <== template.Dependencies
+    t <== !template.Dependencies
   
 /// Creates a TargetTemplate with dependencies
 let TargetTemplateWithDependecies dependencies body =
@@ -109,7 +113,7 @@ let TargetTemplateWithDependecies dependencies body =
         |> targetFromTemplate
 
 /// Creates a TargetTemplate      
-let TargetTemplate body = TargetTemplateWithDependecies [] body 
+let TargetTemplate body = TargetTemplateWithDependecies (ref []) body 
   
 /// Creates a Target
 let Target name body = TargetTemplate body name ()  
@@ -150,17 +154,17 @@ let runFinalTargets() =
 /// <param name="verbose">Whether to print verbose output or not.</param>
 /// <param name="target">The target for which the dependencies should be printed.</param>
 let PrintDependencyGraph verbose target =
-    logfn "%sDependencyGraph for Target %s:" (if verbose then String.Empty else "Shortened ") target 
+    logfn "%sDependencyGraph for Target %s:" (if verbose then String.Empty else "Shortened ") target.Name
     let printed = new HashSet<_>()
     let order = new List<_>()
     let rec printDependencies indent act =
-        let target = TargetDict.[act]
+        let target = act
         let addToOrder = not (printed.Contains act)
         printed.Add act |> ignore
     
-        if addToOrder || verbose then log <| (sprintf "<== %s" act).PadLeft(3 * indent)
-        Seq.iter (printDependencies (indent+1)) target.Dependencies
-        if addToOrder then order.Add act
+        if addToOrder || verbose then log <| (sprintf "<== %s" act.Name).PadLeft(3 * indent)
+        Seq.iter (printDependencies (indent+1)) (!target.Dependencies)
+        if addToOrder then order.Add act.Name
         
     printDependencies 0 target
     log ""
@@ -191,20 +195,20 @@ let WriteTaskTimeSummary total =
 let run targetName =            
     let rec runTarget targetName =
         try      
-            if errors = [] && ExecutedTargets.Contains targetName |> not then
+            if List.isEmpty errors (* && ExecutedTargets.Contains targetName |> not *) then
                 let target = getTarget targetName      
-                traceStartTarget target.Name (dependencyString target)
+                traceStartTarget target.Name (target.Name)
       
-                List.iter runTarget target.Dependencies
+                List.iter runTarget (!target.Dependencies)
       
                 if errors = [] then
                     let watch = new System.Diagnostics.Stopwatch()
                     watch.Start()
                     target.Function()
-                    addExecutedTarget targetName watch.Elapsed
+//                    addExecutedTarget targetName watch.Elapsed
                     traceEndTarget target.Name                
         with
-        | exn -> targetError targetName (exn.ToString())
+        | exn -> targetError targetName.Name (exn.ToString())
       
     let watch = new System.Diagnostics.Stopwatch()
     watch.Start()        
@@ -248,5 +252,22 @@ let And x y = y @ [x]
 /// Runs a Target and its dependencies
 let Run = run
 
+type TargetBuilder() = 
+    member this.YieldFrom(m) = fun () -> ()
+    member this.Return(m) = fun () -> m
+    member this.Combine(step1, step2) = 
+        (fun () -> step1() |> step2)
+    member this.Zero() =  ()
+    member this.Delay(f) = f()
+
+let target = TargetBuilder()
+
+let Clean = target { CleanDirs ["test"]; CleanDirs ["test"] }
+
+let Deploy = target {
+        yield! [Clean]
+    }
+
+
 /// Runs the target given by the build script parameter or the given default target
-let RunParameterTargetOrDefault parameterName defaultTarget = getBuildParamOrDefault parameterName defaultTarget |> Run
+//let RunParameterTargetOrDefault parameterName defaultTarget = getBuildParamOrDefault parameterName defaultTarget |> Run
